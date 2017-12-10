@@ -29,7 +29,18 @@ var (
 	cloneForks = flag.Bool("cloneForks", false, "Option to clone org and user repos that are forks. Default is false")
 	orgOnly    = flag.Bool("orgOnly", false, "Option to skip cloning user repo's when scanning an org. Default is false")
 	toolName   = flag.String("toolName", "all", "Specify whether to run gitsecrets, thog or repo-supervisor")
+	threads    = flag.Int("threads", 10, "Amount of parallel threads")
 )
+
+var executionQueue chan bool
+func enqueueJob(item func()) {
+	executionQueue <- true
+	go func() {
+		item()
+		<- executionQueue
+	}()
+}
+
 
 // Info Function to show colored text
 func Info(format string, args ...interface{}) {
@@ -47,12 +58,13 @@ func check(e error) {
 }
 
 func gitclone(cloneURL string, repoName string, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	cmd := exec.Command("/usr/bin/git", "clone", cloneURL, repoName)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	err := cmd.Run()
 	check(err)
-	wg.Done()
 }
 
 func cloneorgrepos(ctx context.Context, client *github.Client, org string) error {
@@ -83,20 +95,28 @@ func cloneorgrepos(ctx context.Context, client *github.Client, org string) error
 			orgclone.Add(1)
 			fmt.Println(*repo.CloneURL)
 			//cloning the individual org repos
-			go gitclone(*repo.CloneURL, "/tmp/repos/org/"+*repo.Name, &orgclone)
+			func(orgclone *sync.WaitGroup, repo *github.Repository) {
+				enqueueJob(func() {
+					gitclone(*repo.CloneURL, "/tmp/repos/org/" + *repo.Name, orgclone)
+				})
+			}(&orgclone, repo)
 		case false:
 			//not cloning forks
 			if !*repo.Fork {
 				orgclone.Add(1)
 				fmt.Println(*repo.CloneURL)
 				//cloning the individual org repos
-				go gitclone(*repo.CloneURL, "/tmp/repos/org/"+*repo.Name, &orgclone)
+				func(orgclone *sync.WaitGroup, repo *github.Repository) {
+					enqueueJob(func() {
+						gitclone(*repo.CloneURL, "/tmp/repos/org/"+*repo.Name, orgclone)
+					})
+				}(&orgclone, repo)
 			}
 		}
 
 	}
 	orgclone.Wait()
-	fmt.Println("")
+	fmt.Println("Done cloning org repos.")
 	return nil
 }
 
@@ -126,20 +146,28 @@ func cloneuserrepos(ctx context.Context, client *github.Client, user string) err
 			//cloning everything
 			userrepoclone.Add(1)
 			fmt.Println(*userRepo.CloneURL)
-			go gitclone(*userRepo.CloneURL, "/tmp/repos/users/"+user+"/"+*userRepo.Name, &userrepoclone)
+			func (user string, userrepoclone *sync.WaitGroup, userRepo *github.Repository) {
+				enqueueJob(func() {
+					gitclone(*userRepo.CloneURL, "/tmp/repos/users/" + user + "/" + *userRepo.Name, userrepoclone)
+				})
+			}(user, &userrepoclone, userRepo)
 		case false:
 			//not cloning forks
 			if !*userRepo.Fork {
 				userrepoclone.Add(1)
 				fmt.Println(*userRepo.CloneURL)
-				go gitclone(*userRepo.CloneURL, "/tmp/repos/users/"+user+"/"+*userRepo.Name, &userrepoclone)
+				func (user string, userrepoclone *sync.WaitGroup, userRepo *github.Repository) {
+					enqueueJob(func() {
+						gitclone(*userRepo.CloneURL, "/tmp/repos/users/" + user + "/" + *userRepo.Name, userrepoclone)
+					})
+				}(user, &userrepoclone, userRepo)
 			}
 		}
 
 	}
 
 	userrepoclone.Wait()
-	fmt.Println("")
+	fmt.Println("Done cloning user repos.")
 	return nil
 }
 
@@ -167,7 +195,11 @@ func cloneusergists(ctx context.Context, client *github.Client, user string) err
 		fmt.Println(*userGist.GitPullURL)
 
 		//cloning the individual user gists
-		go gitclone(*userGist.GitPullURL, "/tmp/repos/users/"+user+"/"+*userGist.ID, &usergistclone)
+		func (userGist *github.Gist, user string, usergistclone *sync.WaitGroup) {
+			enqueueJob(func() {
+				gitclone(*userGist.GitPullURL, "/tmp/repos/users/" + user + "/" + *userGist.ID, usergistclone)
+			})
+		}(userGist, user, &usergistclone)
 	}
 
 	usergistclone.Wait()
@@ -226,6 +258,7 @@ func runReposupervisor(filepath string, reponame string, orgoruser string) error
 }
 
 func runGitTools(tool string, filepath string, wg *sync.WaitGroup, reponame string, orgoruser string) {
+	defer wg.Done()
 
 	switch tool {
 	case "all":
@@ -248,20 +281,22 @@ func runGitTools(tool string, filepath string, wg *sync.WaitGroup, reponame stri
 		err := runReposupervisor(filepath, reponame, orgoruser)
 		check(err)
 	}
-
-	wg.Done()
 }
 
 func scanforeachuser(user string, wg *sync.WaitGroup) {
+	defer wg.Done()
 	var wguserrepogist sync.WaitGroup
+
 	gituserrepos, _ := ioutil.ReadDir("/tmp/repos/users/" + user)
 	for _, f := range gituserrepos {
 		wguserrepogist.Add(1)
-		go runGitTools(*toolName, "/tmp/repos/users/"+user+"/"+f.Name()+"/", &wguserrepogist, f.Name(), user)
-
+		func (user string, wg *sync.WaitGroup,wguserrepogist *sync.WaitGroup, f os.FileInfo) {
+			enqueueJob(func(){
+				runGitTools(*toolName, "/tmp/repos/users/"+user+"/"+f.Name()+"/", wguserrepogist, f.Name(), user)
+			})
+		}(user, wg, &wguserrepogist, f)
 	}
 	wguserrepogist.Wait()
-	wg.Done()
 }
 
 func toolsOutput(toolname string, of *os.File) error {
@@ -377,7 +412,11 @@ func scanorgrepos(org string) error {
 	gitorgrepos, _ := ioutil.ReadDir("/tmp/repos/org/")
 	for _, f := range gitorgrepos {
 		wgorg.Add(1)
-		go runGitTools(*toolName, "/tmp/repos/org/"+f.Name()+"/", &wgorg, f.Name(), org)
+		func (f os.FileInfo, wgorg *sync.WaitGroup, org string) {
+			enqueueJob(func () {
+				runGitTools(*toolName, "/tmp/repos/org/"+f.Name()+"/", wgorg, f.Name(), org)
+			})
+		}(f, &wgorg, org)
 
 	}
 	wgorg.Wait()
@@ -423,6 +462,8 @@ func main() {
 
 	//Parsing the flags
 	flag.Parse()
+
+	executionQueue = make(chan bool, *threads)
 
 	//Logic to check the program is ingesting proper flags
 	err := checkflags(*token, *org, *user, *repoURL, *gistURL)
@@ -484,7 +525,11 @@ func main() {
 			var wguser sync.WaitGroup
 			for _, user := range allUsers {
 				wguser.Add(1)
-				go scanforeachuser(*user.Login, &wguser)
+				func (wguser *sync.WaitGroup, user *github.User) {
+					enqueueJob(func() {
+						scanforeachuser(*user.Login, wguser)
+					})
+				}(&wguser,user )
 			}
 			wguser.Wait()
 			Info("Finished scanning all user repositories and gists\n")
@@ -501,7 +546,11 @@ func main() {
 		Info("Scanning all user repositories and gists now..This may take a while so please be patient\n")
 		var wguseronly sync.WaitGroup
 		wguseronly.Add(1)
-		go scanforeachuser(*user, &wguseronly)
+		func (wguseronly *sync.WaitGroup) {
+			enqueueJob(func() {
+				scanforeachuser(*user, wguseronly)
+			})
+		}(&wguseronly)
 		wguseronly.Wait()
 		Info("Finished scanning all user repositories and gists\n")
 
@@ -537,7 +586,11 @@ func main() {
 		Info("Starting to clone: " + url + "\n")
 		var wgo sync.WaitGroup
 		wgo.Add(1)
-		go gitclone(url, fpath, &wgo)
+		func (url string, fpath string,wgo *sync.WaitGroup ) {
+			enqueueJob(func() {
+				gitclone(url, fpath, wgo)
+			})
+		}(url, fpath, &wgo)
 		wgo.Wait()
 		Info("Cloning of: " + url + " finished\n")
 
@@ -546,7 +599,11 @@ func main() {
 		var wgs sync.WaitGroup
 		wgs.Add(1)
 
-		go runGitTools(*toolName, fpath+"/", &wgs, rn, orgoruserName)
+		func (rn string, fpath string,wgs *sync.WaitGroup, orgoruserName string ) {
+			enqueueJob(func() {
+				runGitTools(*toolName, fpath+"/", wgs, rn, orgoruserName)
+			})
+		}(rn, fpath, &wgs, orgoruserName)
 
 		wgs.Wait()
 		Info("Scanning of: " + url + " finished\n")
