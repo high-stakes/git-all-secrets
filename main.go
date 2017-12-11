@@ -44,7 +44,6 @@ func enqueueJob(item func()) {
 	}()
 }
 
-
 // Info Function to show colored text
 func Info(format string, args ...interface{}) {
 	fmt.Printf("\x1b[34;1m%s\x1b[0m\n", fmt.Sprintf(format, args...))
@@ -99,7 +98,6 @@ func executeclone(repo *github.Repository, directory string, wg *sync.WaitGroup)
 	}
 
 	orgclone.Wait()
-	fmt.Println("")
 	wg.Done()
 }
 
@@ -126,11 +124,7 @@ func cloneorgrepos(ctx context.Context, client *github.Client, org string) error
 	//iterating through the repo array
 	for _, repo := range orgRepos {
 		orgrepowg.Add(1)
-		func(orgclone *sync.WaitGroup, repo *github.Repository) {
-			enqueueJob(func() {
-				executeclone(repo, "/tmp/repos/org/" + *repo.Name, orgclone)
-			})
-		}(&orgrepowg, repo)
+		go executeclone(repo, "/tmp/repos/org/" + *repo.Name, &orgrepowg)
 	}
 
 	orgrepowg.Wait()
@@ -172,11 +166,7 @@ func cloneuserrepos(ctx context.Context, client *github.Client, user string) err
 	//iterating through the userRepos array
 	for _, userRepo := range userRepos {
 		userrepowg.Add(1)
-		func (user string, userrepowg *sync.WaitGroup, userRepo *github.Repository) {
-			enqueueJob(func() {
-				executeclone(userRepo, "/tmp/repos/users/"+user+"/"+*userRepo.Name, userrepowg)
-			})
-		}(user, &userrepowg, userRepo)
+		go executeclone(userRepo, "/tmp/repos/users/"+user+"/"+*userRepo.Name, &userrepowg)
 	}
 
 	userrepowg.Wait()
@@ -224,7 +214,6 @@ func cloneusergists(ctx context.Context, client *github.Client, user string) err
 	}
 
 	usergistclone.Wait()
-	fmt.Println("")
 	return nil
 }
 
@@ -636,11 +625,7 @@ func cloneTeamRepos(ctx context.Context, client *github.Client, org string, team
 		//iterating through the repo array
 		for _, repo := range teamRepos {
 			teamrepowg.Add(1)
-			func(teamrepowg *sync.WaitGroup, repo *github.Repository) {
-				enqueueJob(func() {
-					executeclone(repo, "/tmp/repos/team/"+*repo.Name, teamrepowg)
-				})
-			}(&teamrepowg, repo)
+			go executeclone(repo, "/tmp/repos/team/"+*repo.Name, &teamrepowg)
 		}
 
 		teamrepowg.Wait()
@@ -749,11 +734,7 @@ func main() {
 			var wguser sync.WaitGroup
 			for _, user := range allUsers {
 				wguser.Add(1)
-				func (wguser *sync.WaitGroup, user *github.User) {
-					enqueueJob(func() {
-						scanforeachuser(*user.Login, wguser)
-					})
-				}(&wguser,user )
+				go scanforeachuser(*user.Login, &wguser)
 			}
 			wguser.Wait()
 			Info("Finished scanning all user repositories and gists\n")
@@ -770,11 +751,7 @@ func main() {
 		Info("Scanning all user repositories and gists now..This may take a while so please be patient\n")
 		var wguseronly sync.WaitGroup
 		wguseronly.Add(1)
-		func (wguseronly *sync.WaitGroup) {
-			enqueueJob(func() {
-				scanforeachuser(*user, wguseronly)
-			})
-		}(&wguseronly)
+		go scanforeachuser(*user, &wguseronly)
 		wguseronly.Wait()
 		Info("Finished scanning all user repositories and gists\n")
 
